@@ -18,6 +18,10 @@ class Cache {
 
 	function __construct($CacheDir = CACHE_DIRECTORY, $SpoolDir = SPOOLING_DIRECTORY) {
 		$this->CacheDir = $CacheDir;
+		# $SpoolDir is kept for compatibility but is no longer used.
+		# Spool files are created next to the cache file instead (see _SpoolFileName()),
+		# because rename() across filesystems (each cache dir is its own ZFS dataset)
+		# is a non-atomic copy + unlink, not an atomic move.
 		$this->SpoolDir = $SpoolDir;
 	}
 
@@ -63,15 +67,15 @@ class Cache {
 			$this->_Log('Cache: FAILED Retrieve NOT FOUND ' . $CacheFileName);
 			$result = -2;
 		}
-		
+
 		return $result;
 	}
 
 	function Add($key) {
 		$result = 0;
 		$key = $this->_LocalizedKey($key);
-		// need to use key name with care.  Remove all non a-z, A-Z, and 0-9.
-		$SpoolFileName = $this->_SpoolFileName($key);
+		$CacheFileName = $this->_CacheFileName($key);
+		$SpoolFileName = $this->_SpoolFileName($CacheFileName);
 		$SpoolFileHandle = fopen($SpoolFileName, 'w');
 		if ($SpoolFileHandle) {
 			// write $data to file
@@ -88,9 +92,6 @@ class Cache {
 				chmod($SpoolFileName, 0774);
 				umask($old);
 
-				// mv spool file to cache dir
-				$CacheFileName = $this->_CacheFileName($key);
-
 				// mv $SpoolFileName $CacheFileName
 				if (rename($SpoolFileName, $CacheFileName)) {
 					// success
@@ -100,7 +101,7 @@ class Cache {
 				} else {
 					// rm $SpoolFileName
 					unlink($SpoolFileName);
-					$this->_Log('Cache: FAILED Add on move" ' . $SpoolFileName . ' to ' . $CacheFileName);
+					$this->_Log('Cache: FAILED Add on move ' . $SpoolFileName . ' to ' . $CacheFileName);
 				}
 			} else {
 				fclose($SpoolFileHandle);
@@ -163,10 +164,17 @@ class Cache {
 		return $new_key;
 	}
 
-	function _SpoolFileName($key) {
-		$FileName = tempnam($this->SpoolDir, $this->_CleanKey($key) . '.tmp');
+	function _SpoolFileName($CacheFileName) {
+		# Spool in the same directory as the cache file, never in $this->SpoolDir.
+		# Each cache directory is its own ZFS dataset. rename() across datasets
+		# fails with EXDEV and PHP falls back to copy + unlink, which truncates
+		# and rewrites the cache file in place. A concurrent Retrieve() then sees
+		# an empty or partial file ("CRITICAL filesize is zero/false").
+		# The leading dot keeps spool files out of * globs, e.g. Remove().
+		$Dir      = dirname($CacheFileName);
+		$FileName = tempnam($Dir, '.spool-');
 
-		$this->_Log('Cache: creating spool file ' . $FileName . ' hopefully in ' . $this->SpoolDir);
+		$this->_Log('Cache: creating spool file ' . $FileName . ' hopefully in ' . $Dir);
 
 		return $FileName;
 	}

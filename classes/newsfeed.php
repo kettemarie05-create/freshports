@@ -43,16 +43,41 @@ function newsfeed($dbh, $Format, $WatchListID = 0, $BranchName = BRANCH_HEAD, $F
 	$Format      = pg_escape_string($dbh, $Format);
 	$Flavor      = pg_escape_string($dbh, $Flavor ?? '');
 
+	# the cache file keeps the requested format: an RSS 2.0 feed carries its own URL (atom:link rel="self"),
+	# so news.php and rss2.0.php cannot share one
+	$CacheFormat = $Format;
+
+	# news.php (format NEWS) fell through to RSS 0.91, but with 100 items and long descriptions
+	# it was really RSS 2.0. The same goes for watch lists, whose default format is rss0.91:
+	# serve both as RSS 2.0 rather than cut them down to the 15 items RSS 0.91 allows.
+	if ($Format == 'NEWS' || ($WatchListID && $Format == 'RSS0.91')) {
+		$Format = 'RSS2.0';
+	}
+
+	# UniversalFeedCreator puts "; filename=..." into Content-Type (Content-Disposition already
+	# has it) and serves RSS 1.0 as application/xml. Correct the header just before it is sent.
+	header_register_callback(function() use ($Format) {
+		foreach (headers_list() as $header) {
+			if (stripos($header, 'Content-Type:') === 0) {
+				$header = preg_replace('/;\s*filename=[^;]*/i', '', $header);
+				if ($Format == 'RSS1.0') {
+					$header = str_ireplace('application/xml', 'application/rdf+xml', $header);
+				}
+				header($header);
+			}
+		}
+	});
+
 	$PHP_SELF = $_SERVER['PHP_SELF'];
 
 	# potential for exploitation here, with $WatchListID, $BranchName, $Format & $Flavor
 	if ($WatchListID) {
-		define('NEWSFEEDCACHE', NEWS_DIRECTORY . '/news.' . $WatchListID . '.'  . $Format . '.' . $BranchName . '.xml');
+		define('NEWSFEEDCACHE', NEWS_DIRECTORY . '/news.' . $WatchListID . '.'  . $CacheFormat . '.' . $BranchName . '.xml');
 	} else {
 		if (empty($Flavor)) {
-			define('NEWSFEEDCACHE', NEWS_DIRECTORY . '/news.' . $Format . '.' . $BranchName . '.xml');
+			define('NEWSFEEDCACHE', NEWS_DIRECTORY . '/news.' . $CacheFormat . '.' . $BranchName . '.xml');
 		} else {
-			define('NEWSFEEDCACHE', NEWS_DIRECTORY . '/news.' . $Format . '.' . $BranchName . '.' . $Flavor . '.xml');
+			define('NEWSFEEDCACHE', NEWS_DIRECTORY . '/news.' . $CacheFormat . '.' . $BranchName . '.' . $Flavor . '.xml');
 		}
 	}
 
@@ -95,7 +120,22 @@ function newsfeed($dbh, $Format, $WatchListID = 0, $BranchName = BRANCH_HEAD, $F
 
 	$rss->title          = 'FreshPorts news'; 
 	$rss->description    = 'The place for ports'; 
-	$rss->syndicationURL = $_SERVER['HTTP_HOST'] . '/' .  $PHP_SELF;
+	# This feed's own URL: RSS 1.0 rdf:about, and the RSS 2.0 self link.
+	# Build it from the parameters that select the cache file, so other parameters
+	# in the first request do not end up in everyone's copy.
+	# A watch list without format= shares the cache file of its default format, so always name it.
+	$Query = array();
+	foreach (array('id', 'format', 'flavor', 'branch') as $Name) {
+		if ($Name == 'format' && $WatchListID) {
+			$Query[] = 'format=' . rawurlencode(strtolower($CacheFormat));
+		} elseif (isset($_GET[$Name]) && is_string($_GET[$Name]) && $_GET[$Name] !== '') {
+			$Query[] = $Name . '=' . rawurlencode($_GET[$Name]);
+		}
+	}
+	$SelfURL = 'https://' . $_SERVER['HTTP_HOST'] . $PHP_SELF . ($Query ? '?' . implode('&', $Query) : '');
+
+	# RSSCreator10 writes rdf:about without escaping it
+	$rss->syndicationURL = ($Format == 'RSS1.0') ? htmlspecialchars($SelfURL) : $SelfURL;
 
 	$rss->editor    = 'editor@freshports.org (The Editor)';
 	$rss->webmaster = 'webmaster@freshports.org (The Webmaster)';
@@ -107,12 +147,12 @@ function newsfeed($dbh, $Format, $WatchListID = 0, $BranchName = BRANCH_HEAD, $F
 	//$rss->descriptionHtmlSyndicated = true;
 	//$rss->xslStyleSheet = 'http://feedster.com/rss20.xsl';
 
-	$rss->link    = 'http://' . $_SERVER['HTTP_HOST']; 
+	$rss->link    = 'https://' . $_SERVER['HTTP_HOST'];
 
-	$image = new FeedImage(); 
-	$image->title       = 'FreshPorts news'; 
-	$image->url         = 'http://' . $_SERVER['HTTP_HOST'] .'/images/freshports_mini.jpg'; 
-	$image->link        = 'http://' . $_SERVER['HTTP_HOST']; ; 
+	$image = new FeedImage();
+	$image->title       = 'FreshPorts news';
+	$image->url         = 'https://' . $_SERVER['HTTP_HOST'] .'/images/freshports_mini.jpg';
+	$image->link        = 'https://' . $_SERVER['HTTP_HOST'];
 	$image->description = 'Feed provided by FreshPorts. Click to visit.'; 
 
 	//optional
@@ -270,7 +310,7 @@ ORDER BY CL.commit_date DESC, CL.id ASC, E.name, category, version';
          JOIN ports_vulnerable PV ON PV.current    > 0            AND PV.port_id = P.id
          JOIN categories       C  ON P.category_id = C.id
          JOIN commit_log       CL ON CL.id         = P.last_commit_id
-ORDER BY CL.commit_date;
+ORDER BY CL.commit_date DESC, P.name;
 ';
 				$params = array();
                                 break;
@@ -362,8 +402,16 @@ ORDER BY CL.commit_date;
 		die('We broke the SQL, sorry');
 	}
 
+	# RSS 0.91 allows at most 15 items, and descriptions of at most 500 characters
+	$IsRSS091 = ($Format == 'RSS0.91');
+	$NumItems = 0;
+
 	# build the information for the feed.
 	while ($myrow = pg_fetch_array($result)) {
+		if ($IsRSS091 && ++$NumItems > 15) {
+			break;
+		}
+
 		$item = new FeedItem();
 
 		switch ($Flavor) {
@@ -387,7 +435,19 @@ ORDER BY CL.commit_date;
 
 		$item->title = $myrow['category'] . '/' . $myrow["port"] . ' - ' . freshports_PackageVersion($myrow['version'], $myrow['revision'], $myrow['epoch']);
 		$item->link  = $link;
-		$item->description = nl2br(htmlspecialchars(trim($description)));
+		if ($IsRSS091) {
+			# plain text, cut here: the library would cut after escaping, possibly mid-entity
+			$description = preg_replace('/\s+/', ' ', trim($description));
+			$Length = mb_strlen($description);
+			while (mb_strlen(htmlspecialchars($description)) > 500) {
+				$Length -= 20;
+				$description = mb_substr($description, 0, $Length);
+				$description = mb_substr($description, 0, mb_strrpos($description, ' ') ?: $Length) . ' ...';
+			}
+			$item->description = htmlspecialchars($description);
+		} else {
+			$item->description = nl2br(htmlspecialchars(trim($description)));
+		}
 
 		//optional
 		//item->descriptionTruncSize = 500;
@@ -407,6 +467,29 @@ ORDER BY CL.commit_date;
 
 	# write the cache file without sending it, so the headers can use its time
 	$rss->saveFeed($Format, NEWSFEEDCACHE, false);
+
+	if ($Format == 'OPML') {
+		# UniversalFeedCreator leaves out the version attribute OPML requires, and marks
+		# each outline as an RSS feed, though it links to a commit or port page
+		$opml = @file_get_contents(NEWSFEEDCACHE);
+		if ($opml !== false) {
+			$opml = preg_replace('/<opml [^>]*>/', '<opml version="1.0">', $opml, 1);
+			$opml = str_replace('<outline type="rss" ', '<outline type="link"', $opml);
+			file_put_contents(NEWSFEEDCACHE, $opml, LOCK_EX);
+		}
+	}
+
+	if ($Format == 'RSS2.0') {
+		# feed readers and the W3C feed validator want an RSS 2.0 feed to give its own URL
+		$SelfLink = '        <atom:link href="' . htmlspecialchars($SelfURL) . '" rel="self" type="application/rss+xml" />' . "\n";
+
+		$rss2 = @file_get_contents(NEWSFEEDCACHE);
+		if ($rss2 !== false) {
+			$rss2 = preg_replace('/<rss version="2.0"/', '<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"', $rss2, 1);
+			$rss2 = preg_replace_callback('/<channel[^>]*>\n/', function($m) use ($SelfLink) { return $m[0] . $SelfLink; }, $rss2, 1);
+			file_put_contents(NEWSFEEDCACHE, $rss2, LOCK_EX);
+		}
+	}
 
 	clearstatcache(true, NEWSFEEDCACHE);
 	$CacheTime = @filemtime(NEWSFEEDCACHE);

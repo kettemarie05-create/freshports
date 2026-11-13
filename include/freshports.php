@@ -1187,7 +1187,8 @@ function freshports_HEAD_main_items() {
 	return '
 	<link rel="SHORTCUT ICON" href="/favicon.ico">
 
-	<link rel="alternate" type="application/rss+xml" title="FreshPorts - The Place For Ports" href="https://' . $_SERVER['HTTP_HOST'] . '/backend/rss2.0.php">
+	<link rel="alternate" type="application/rss+xml" title="FreshPorts - The Place For Ports" href="https://' . $_SERVER['HTTP_HOST'] . '/--/feeds/commits.php">
+	<link rel="alternate" type="application/atom+xml" title="FreshPorts - The Place For Ports (Atom)" href="https://' . $_SERVER['HTTP_HOST'] . '/--/feeds/commits.php?format=atom">
 
 	<link rel="search" type="application/opensearchdescription+xml" href="https://' . $_SERVER['HTTP_HOST'] . '/opensearch.php" title="FreshPorts">
 
@@ -1601,6 +1602,43 @@ function freshports_PackageVersionComment() {
 
 	# '--' is not allowed inside an HTML comment
 	return "\n<!-- freshports-www " . str_replace('--', '- -', htmlspecialchars($Version)) . " -->\n";
+}
+
+# Written by system_status.sh on the ingress host, one "name version" per line,
+# and mounted read-only here.  It is rewritten only when a version changes.
+define('FRESHPORTS_INGRESS_VERSIONS', '/var/db/freshports/cache/html/ingress-versions.txt');
+
+# Show which release of the ingress code and packages this site's ingress host
+# runs, in the page source only, one comment per line, e.g.
+#
+#   <!-- ingress ingress-scripts 2.3.7 -->
+#   <!-- ingress freshports-periodics 1.4 -->
+#
+# Nothing is shown if the file is missing or unreadable.
+function freshports_IngressVersionComments() {
+	$Lines = @file(FRESHPORTS_INGRESS_VERSIONS, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+	if ($Lines === false) {
+		return '';
+	}
+
+	$HTML = '';
+	foreach ($Lines as $Line) {
+		if (!preg_match('/^([A-Za-z0-9._+-]+) (\S+)$/', trim($Line), $Matches)) {
+			continue;
+		}
+
+		# '--' is not allowed inside an HTML comment
+		$HTML .= '<!-- ingress ' . str_replace('--', '- -', htmlspecialchars($Matches[1] . ' ' . $Matches[2])) . " -->\n";
+	}
+
+	return $HTML;
+}
+
+# The mtime of the ingress versions file, or 0 if there is none.
+function freshports_IngressVersionsLastModified() {
+	$Time = @filemtime(FRESHPORTS_INGRESS_VERSIONS);
+
+	return $Time === false ? 0 : $Time;
 }
 
 # Returns a Last-Modified time (unix) for a page that shows the version,
@@ -2286,7 +2324,7 @@ alt="powered by nginx" width="121" height="32"></a>
 ' . sprintf(_('Valid %1$s, %2$s, and %3$s.'),
 '<a href="https://validator.w3.org/check?uri=' . $URI . '" title="' . _('We like to keep our HTML valid') . '" target="_blank" rel="nofollow noopener noreferrer">HTML</a>',
 '<a href="https://jigsaw.w3.org/css-validator/validator?uri=' .  $URI . '" title="' . _('We like to have valid CSS') . '" rel="nofollow noopener noreferrer">CSS</a>',
-'<a href="https://validator.w3.org/feed/check.cgi?url=' . rawurlencode("{$URIBase}/backend/rss2.0.php") . '" title="' . _('Valid RSS is good too') . '" rel="noopener noreferrer">RSS</a>') . '
+'<a href="https://validator.w3.org/feed/check.cgi?url=' . rawurlencode("{$URIBase}/--/feeds/commits.php") . '" title="' . _('Valid RSS is good too') . '" rel="noopener noreferrer">RSS</a>') . '
 </small>
 ' . freshports_copyright() . '
 </td></tr>
@@ -2434,7 +2472,7 @@ $HTML .= '<br>
 </table>';
 
 
-if (IsSet($visitor)) {
+if (!empty($User->id)) {
 
 
 $HTML .= '<br>

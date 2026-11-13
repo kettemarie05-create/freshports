@@ -121,6 +121,11 @@ class Port {
 	// version on current quarterly branch. see https://github.com/FreshPorts/freshports/issues/115
 	var $quarterly_revision;
 
+	// a newer version found upstream by portscout. set by LoadUpstream(). see https://github.com/FreshPorts/freshports/issues/626
+	var $upstream_version;
+	var $upstream_maintainer;
+	var $upstream_discovered;
+
     var $use_rc_subr;
 
 	var $Debug = 0;
@@ -554,6 +559,57 @@ ON TEMP.wle_element_id = ports.element_id';
 		return pg_num_rows($result) == 1;
 	}
 
+	function LoadUpstream() {
+		# true if portscout has found a newer version of this port upstream, and
+		# sets the upstream_* properties.  See https://github.com/FreshPorts/freshports/issues/626
+		#
+		# port_upstream is filled daily from portscout, by the ingress script
+		# portscout_upstream.pl.  port_version is ports.version as it was then.
+		# Once a commit changes the version, the row no longer applies, so it is
+		# not shown, without waiting for the next load to remove it.
+		#
+		# discovered is UTC, the day only.
+		#
+		# Only columns whose change makes the ingress clear this port's cached
+		# pages may be shown: port_version, newver, maintainer, discovered.
+		# newurl and checked change without clearing anything.
+
+		$this->upstream_version    = null;
+		$this->upstream_maintainer = null;
+		$this->upstream_discovered = null;
+
+		$sql = "-- " . __FILE__ . '::' . __FUNCTION__ . "\n" . '
+		SELECT PU.newver,
+		       PU.maintainer,
+		       to_char(PU.discovered AT TIME ZONE \'UTC\', \'YYYY-MM-DD\') AS discovered
+		  FROM port_upstream PU
+		  JOIN ports P ON P.id      = PU.port_id
+		              AND P.version = PU.port_version
+		 WHERE PU.port_id = $1';
+
+		if ($this->Debug) {
+			echo "<pre>$sql</pre>";
+		}
+
+		$result = pg_query_params($this->dbh, $sql, array($this->id));
+		if (!$result) {
+			syslog(LOG_ERR, __FILE__ . '::' . __FUNCTION__ . ' failed: ' . pg_last_error($this->dbh));
+			return false;
+		}
+
+		if (pg_num_rows($result) != 1) {
+			return false;
+		}
+
+		$myrow = pg_fetch_array($result);
+
+		$this->upstream_version    = $myrow['newver'];
+		$this->upstream_maintainer = $myrow['maintainer'];
+		$this->upstream_discovered = $myrow['discovered'];
+
+		return true;
+	}
+
 	function FetchByCategoryPortBranch($Category, $Port, $Branch, $UserID = 0) {
 		# fetch a single port based on Category/Name on a Branch.
 		# used by rewrite/url-parser.php::Try_Displaying_Port()
@@ -705,9 +761,11 @@ ON TEMP.wle_element_id = ports.element_id';
 		return $bResult;
 	}
 
-	function FetchByCategoryInitialise($CategoryName, $UserID = 0, $PageSize = 0, $PageNo = 0, $Branch = BRANCH_HEAD) {
+	function FetchByCategoryInitialise($CategoryName, $UserID = 0, $PageSize = 0, $PageNo = 0, $Branch = BRANCH_HEAD, $Sort = CATEGORY_SORT_NAME) {
 		# fetch all ports based on category
 		# e.g. id for net
+		#
+		# $Sort is one of the CATEGORY_SORT_* constants; anything else sorts by name.
 
 #		die("into " . __FUNCTION__ . 'with branch = ' . $Branch);
 
@@ -732,9 +790,31 @@ ON TEMP.wle_element_id = ports.element_id';
 		# pages, and the functions would otherwise be evaluated for every OFFSET row.
 		# ports.id breaks ties between ports with the same name, so paging is stable.
 		#
+		# sort_date is the date being sorted on (NULL when sorting by name). It is
+		# carried out of page_ports so the final ORDER BY matches the paging order.
+		# Newest first; ports without a date go last.
+		#
+		switch ($Sort) {
+			case CATEGORY_SORT_CREATED:
+				$sort_date = 'ports.date_added';
+				$sort_join = '';
+				break;
+
+			case CATEGORY_SORT_UPDATED:
+				$sort_date = 'CL.commit_date';
+				$sort_join = '
+         LEFT JOIN commit_log CL ON CL.id                = ports.last_commit_id';
+				break;
+
+			default:
+				$sort_date = 'NULL::timestamptz';
+				$sort_join = '';
+				break;
+		}
+
 		$sql_page_ports = "
 WITH page_ports AS (
-  SELECT ports.id, element.name AS port
+  SELECT ports.id, element.name AS port, $sort_date AS sort_date
     FROM ports_categories
          JOIN categories       ON categories.id          = ports_categories.category_id
                               AND categories.name        = $1
@@ -742,8 +822,8 @@ WITH page_ports AS (
          JOIN element          ON element.id             = ports.element_id
                               AND element.status         = 'A'
          JOIN element_pathname EP ON EP.element_id       = ports.element_id
-                              AND EP.pathname         like $2
-   ORDER BY element.name, ports.id";
+                              AND EP.pathname         like $2$sort_join
+   ORDER BY sort_date DESC NULLS LAST, element.name, ports.id";
 
 		if ($PageSize) {
 			$params[] = $PageSize;
@@ -850,7 +930,8 @@ SELECT ports.id,
         NULL AS onwatchlist,
         PortVersionOnQuarterlyBranch(ports.id, categories.name || '/' || page_ports.port) AS quarterly_revision, 
         use_rc_subr,
-        page_ports.port
+        page_ports.port,
+        page_ports.sort_date
 
    FROM page_ports
         JOIN ports                          ON ports.id                 = page_ports.id
@@ -873,7 +954,7 @@ LEFT OUTER JOIN
 		}
 
 		$sql .= "
- ORDER BY port, id";
+ ORDER BY sort_date DESC NULLS LAST, port, id";
 
 		if ($this->Debug) echo "<pre>$sql</pre>";
 

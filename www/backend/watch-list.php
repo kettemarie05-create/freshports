@@ -62,17 +62,18 @@ function DisplayWatchListNewsFeeds($db, $UserID) {
 	if ($NumRows) {
 		for ($i = 0; $i < $NumRows; $i++) {
 			$WatchList = $WatchLists->FetchNth($i);
-			$URL = $Protocol . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['PHP_SELF'] . '?id=' . $WatchList->token . '&format=rss0.91';
-			$HTML .= '<a href="' . $URL . '">' . $WatchList->name . '</a><br>';
+			# the feeds in /--/feeds/; this script still serves the old ones - re #721
+			$URL = 'https://' . $_SERVER['HTTP_HOST'] . '/--/feeds/watch-list.php?id=' . rawurlencode($WatchList->token);
+			$HTML .= '<a href="' . htmlspecialchars($URL) . '">' . htmlspecialchars($WatchList->name) . '</a>'
+			       . ' [ <a href="' . htmlspecialchars($URL . '&format=atom') . '">Atom</a> ]<br>';
 		}
 	}
 
 	$HTML .= "<p>" . _('You can use these formats:') . "
-	
+
 	<ul>
-	<li>" . sprintf(_('%s (default)'), 'rss0.91') . "</li>
-	<li>rss1.0</li>
-	<li>rss2.0</li>
+	<li>" . sprintf(_('%s (default)'), 'RSS 2.0') . "</li>
+	<li>Atom 1.0 (format=atom)</li>
 	</ul>";
 
 	echo $HTML;	
@@ -86,21 +87,23 @@ function DisplayWatchListNewsFeeds($db, $UserID) {
 		$format = pg_escape_string($db, $_REQUEST['format']);
 	}
 
+	# no token and not logged in: the list of feeds needs a login
 	if (empty($visitor) && empty($token)) {
-		header('HTTP/1.0 401 Unauthorized');
+		header('Location: /login.php');  /* Redirect browser to PHP web site */
 		exit;  /* Make sure that code below does not get executed when we redirect. */
 	}
 
 
 # validate incoming format
 	switch (strtolower($format ?? '')) {
+		case 'rss0.91':
 		case 'rss1.0':
 		case 'rss2.0':
 			# all good.
 			break;
 
 		default:
-			$format = 'rss0.91';
+			$format = 'rss2.0';
 			break;
 	}
 
